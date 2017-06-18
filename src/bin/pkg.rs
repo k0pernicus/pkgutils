@@ -1,259 +1,90 @@
 #![deny(warnings)]
 
-extern crate liner;
+#[macro_use]
+extern crate clap;
 extern crate pkgutils;
-extern crate version_compare;
 
-use pkgutils::{Repo, Package, PackageMeta, PackageMetaList};
-use std::{env, process};
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::Path;
-use version_compare::{VersionCompare, CompOp};
+use clap::{App, Arg, ArgMatches, SubCommand};
+use pkgutils::commands::{run_clean_cmd, run_create_cmd, run_extract_cmd, run_fetch_cmd,
+                         run_install_cmd, run_list_cmd, run_sign_cmd, run_upgrade_cmd};
+use pkgutils::Repo;
+use std::io::{self, Write};
+use std::process;
 
-fn upgrade(repo: Repo) -> io::Result<()> {
-    let mut local_list = PackageMetaList::new();
-    if Path::new("/pkg/").is_dir() {
-        for entry_res in fs::read_dir("/pkg/")? {
-            let entry = entry_res?;
-
-            let mut toml = String::new();
-            File::open(entry.path())?.read_to_string(&mut toml)?;
-
-            if let Ok(package) = PackageMeta::from_toml(&toml) {
-                local_list.packages.insert(package.name, package.version);
-            }
-        }
+fn run_pkg_cmd(args: &ArgMatches, repo: &Repo, fun: &Fn(&Repo, Vec<&str>) -> ()) {
+    let packages: Vec<&str> = args.values_of("packages").unwrap().collect();
+    if packages.len() == 0 {
+        let _ = write!(io::stderr(), "pkg: no packages specified\n");
+        process::exit(1);
     }
-
-    let tomlfile = repo.sync("repo.toml")?;
-
-    let mut toml = String::new();
-    File::open(tomlfile)?.read_to_string(&mut toml)?;
-
-    let remote_list = PackageMetaList::from_toml(&toml).map_err(|err| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("TOML error: {}", err))
-    })?;
-
-    let mut upgrades = Vec::new();
-    for (package, version) in local_list.packages.iter() {
-        let remote_version = remote_list.packages.get(package).map_or("", |s| &s);
-        match VersionCompare::compare(version, remote_version) {
-            Ok(cmp) => match cmp {
-                CompOp::Lt => {
-                    upgrades.push((package.clone(), version.clone(), remote_version.to_string()));
-                },
-                _ => ()
-            },
-            Err(_err) => {
-                println!("{}: version parsing error when comparing {} and {}", package, version, remote_version);
-            }
-        }
-    }
-
-    if upgrades.is_empty() {
-        println!("All packages are up to date.");
-    } else {
-        for &(ref package, ref old_version, ref new_version) in upgrades.iter() {
-            println!("{}: {} => {}", package, old_version, new_version);
-        }
-
-        let line = liner::Context::new().read_line(
-            "Do you want to upgrade these packages? (Y/n) ",
-            &mut |_| {}
-        )?;
-        match line.to_lowercase().as_str() {
-            "" | "y" | "yes" => {
-                println!("Downloading packages");
-                let mut packages = Vec::new();
-                for (package, _, _) in upgrades {
-                    packages.push(repo.fetch(&package)?);
-                }
-
-                println!("Installing packages");
-                for mut package in packages {
-                    package.install("/")?;
-                }
-            },
-            _ => {
-                println!("Cancelling upgrade.");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn help() -> io::Result<()> {
-    write!(io::stderr(), "pkg [command] [arguments]\n")?;
-    write!(io::stderr(), "    clean [package] - clean an extracted package\n")?;
-    write!(io::stderr(), "    create [directory] - create a package\n")?;;
-    write!(io::stderr(), "    extract [package] - extract a package\n")?;
-    write!(io::stderr(), "    fetch [package] - download a package\n")?;
-    write!(io::stderr(), "    help - show this help message\n")?;
-    write!(io::stderr(), "    install [package] - install a package\n")?;
-    write!(io::stderr(), "    list [package] - list package contents\n")?;
-    write!(io::stderr(), "    sign [file] - get a file signature\n")?;
-    write!(io::stderr(), "    upgrade - upgrade all packages\n")?;
-
-    Ok(())
+    fun(repo, packages);
 }
 
 fn main() {
-    let repo = Repo::new(env!("TARGET"));
+    // let repo = Repo::new(env!("TARGET"));
+    let repo = Repo::new(env!("PATH"));
 
-    let mut args = env::args().skip(1);
-    if let Some(op) = args.next() {
-        match op.as_str() {
-            "clean" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        match repo.clean(package) {
-                            Ok(tardir) => {
-                                let _ = write!(io::stderr(), "pkg: clean: {}: cleaned {}\n", package, tardir);
-                            }
-                            Err(err) => {
-                                let _ = write!(io::stderr(), "pkg: clean: {}: failed: {}\n", package, err);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: clean: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "create" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        match repo.create(package) {
-                            Ok(tarfile) => {
-                                let _ = write!(io::stderr(), "pkg: create: {}: created {}\n", package, tarfile);
-                            }
-                            Err(err) => {
-                                let _ = write!(io::stderr(), "pkg: create: {}: failed: {}\n", package, err);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: create: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "extract" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        match repo.extract(package) {
-                            Ok(tardir) => {
-                                let _ = write!(io::stderr(), "pkg: extract: {}: extracted to {}\n", package, tardir);
-                            },
-                            Err(err) => {
-                                let _ = write!(io::stderr(), "pkg: extract: {}: failed: {}\n", package, err);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: extract: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "fetch" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        match repo.fetch(package) {
-                            Ok(pkg) => {
-                                let _ = write!(io::stderr(), "pkg: fetch: {}: fetched {}\n", package, pkg.path().display());
-                            },
-                            Err(err) => {
-                                let _ = write!(io::stderr(), "pkg: fetch: {}: failed: {}\n", package, err);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: fetch: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "help" => {
-                let _ = help();
-            },
-            "install" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        let pkg = if package.ends_with(".tar") {
-                            let path = format!("{}/{}", env::current_dir().unwrap().to_string_lossy(), package);
-                            Package::from_path(&path)
-                        } else {
-                            repo.fetch(package)
-                        };
+    let args = App::new("pkg")
+        .about("Pkg, the Redox package manager")
+        .version(crate_version!())
+        .subcommand(SubCommand::with_name("clean")
+                        .about("clean an extracted package")
+                        .arg(Arg::with_name("packages").help("The package to use").required(true).multiple(true)))
+        .subcommand(SubCommand::with_name("create")
+                        .about("create a package")
+                        .arg(Arg::with_name("packages").help("The package to use").index(1).required(true)))
+        .subcommand(SubCommand::with_name("extract")
+                        .about("extract a package")
+                        .arg(Arg::with_name("packages").help("The package to use").index(1).required(true)))
+        .subcommand(SubCommand::with_name("fetch")
+                        .about("download a package")
+                        .arg(Arg::with_name("packages").help("The package to use").index(1).required(true)))
+        // TODO: set new commands
+        .subcommand(SubCommand::with_name("install")
+                        .about("install a package")
+                        .arg(Arg::with_name("packages").help("The package to use").index(1).required(true)))
+        .subcommand(SubCommand::with_name("list")
+                        .about("list package contents")
+                        .arg(Arg::with_name("packages").help("The package to use").index(1).required(true)))
+        .subcommand(SubCommand::with_name("sign")
+                        .about("get a file signature")
+                        .arg(Arg::with_name("files").help("The files to sign").index(1).required(true)))
+        .subcommand(SubCommand::with_name("upgrade")
+                        .about("upgrade all package"))
+        .arg(Arg::with_name("verbose")
+                 .short("v")
+                 .multiple(true)
+                 .help("verbosity level"))
+        .get_matches();
 
-                        if let Err(err) = pkg.and_then(|mut p| p.install("/")) {
-                            let _ = write!(io::stderr(), "pkg: install: {}: failed: {}\n", package, err);
-                        } else {
-                            let _ = write!(io::stderr(), "pkg: install: {}: succeeded\n", package);
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: install: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "list" => {
-                let packages: Vec<String> = args.collect();
-                if ! packages.is_empty() {
-                    for package in packages.iter() {
-                        if let Err(err) = repo.fetch(package).and_then(|mut p| p.list()) {
-                            let _ = write!(io::stderr(), "pkg: list: {}: failed: {}\n", package, err);
-                        } else {
-                            let _ = write!(io::stderr(), "pkg: list: {}: succeeded\n", package);
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: list: no packages specified\n");
-                    process::exit(1);
-                }
-            },
-            "sign" => {
-                let files: Vec<String> = args.collect();
-                if ! files.is_empty() {
-                    for file in files.iter() {
-                        match repo.signature(file) {
-                            Ok(signature) => {
-                                let _ = write!(io::stderr(), "pkg: sign: {}: {}\n", file, signature);
-                            },
-                            Err(err) => {
-                                let _ = write!(io::stderr(), "pkg: sign: {}: failed: {}\n", file, err);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = write!(io::stderr(), "pkg: sign: no files specified\n");
-                    process::exit(1);
-                }
-            },
-            "upgrade" => {
-                match upgrade(repo) {
-                    Ok(()) => {
-                        let _ = write!(io::stderr(), "pkg: upgrade: succeeded\n");
-                    },
-                    Err(err) => {
-                        let _ = write!(io::stderr(), "pkg: upgrade: failed: {}\n", err);
-                    }
-                }
-            },
-            _ => {
-                let _ = write!(io::stderr(), "pkg: {}: unknown operation\n", op);
-                let _ = help();
-                process::exit(1);
-            }
+    match args.subcommand() {
+        ("clean", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_clean_cmd);
         }
-    } else {
-        let _ = write!(io::stderr(), "pkg: no operation\n");
-        let _ = help();
-        process::exit(1);
+        ("create", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_create_cmd);
+        }
+        ("extract", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_extract_cmd);
+        }
+        ("fetch", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_fetch_cmd);
+        }
+        ("install", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_install_cmd);
+        }
+        ("list", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_list_cmd);
+        }
+        ("sign", Some(c)) => {
+            run_pkg_cmd(c, &repo, &run_sign_cmd);
+        }
+        ("upgrade", _) => {
+            run_upgrade_cmd(repo);
+        }
+        _ => {
+            let _ = write!(io::stderr(), "Command failed!\n");
+            process::exit(1);
+        }
     }
 }

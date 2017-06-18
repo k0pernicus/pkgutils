@@ -2,11 +2,13 @@
 
 extern crate hyper;
 extern crate hyper_rustls;
+extern crate liner;
 extern crate octavo;
 #[macro_use]
 extern crate serde_derive;
 extern crate tar;
 extern crate toml;
+extern crate version_compare;
 
 use octavo::octavo_digest::Digest;
 use octavo::octavo_digest::sha3::Sha512;
@@ -19,6 +21,7 @@ pub use download::download;
 pub use packagemeta::{PackageMeta, PackageMetaList};
 pub use package::Package;
 
+pub mod commands;
 mod download;
 mod packagemeta;
 mod package;
@@ -56,7 +59,7 @@ impl Repo {
                     let mut data = String::new();
                     if let Ok(_) = file.read_to_string(&mut data) {
                         for line in data.lines() {
-                            if ! line.starts_with('#') {
+                            if !line.starts_with('#') {
                                 remotes.push(line.to_string());
                             }
                         }
@@ -68,7 +71,7 @@ impl Repo {
         Repo {
             local: format!("/tmp/pkg"),
             remotes: remotes,
-            target: target.to_string()
+            target: target.to_string(),
         }
     }
 
@@ -114,7 +117,7 @@ impl Repo {
     }
 
     pub fn create(&self, package: &str) -> io::Result<String> {
-        if ! Path::new(package).is_dir() {
+        if !Path::new(package).is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} not found", package)));
         }
 
@@ -131,7 +134,8 @@ impl Repo {
         let mut signature = self.signature(&tarfile)?;
         signature.push('\n');
 
-        File::create(&sigfile)?.write_all(&signature.as_bytes())?;
+        File::create(&sigfile)?
+            .write_all(&signature.as_bytes())?;
 
         Ok(tarfile)
     }
@@ -155,8 +159,9 @@ impl Repo {
 
         let tarfile = self.sync(&format!("{}.tar", package))?;
 
-        if self.signature(&tarfile)? != expected  {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} not valid", package)));
+        if self.signature(&tarfile)? != expected {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                      format!("{} not valid", package)));
         }
 
         Package::from_path(tarfile)
